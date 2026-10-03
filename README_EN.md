@@ -11,7 +11,7 @@ Adds a destructive red **"Delete session"** row right below **"Archive session"*
 DSH ships Archive only: an archived session stays on disk and can be restored. This plugin adds real deletion:
 
 1. **Menu row** — a red "Delete session" row (trash icon, separator) beneath the shipped "Archive session" row in every sidebar Session's "…" menu.
-2. **Two-step confirm** — the first click arms the row ("Click again to confirm", auto-reset after 6s), the second click runs it; the menu stays open and shows the outcome inline.
+2. **Two-step confirm** — the first click arms the row ("Click again to confirm", auto-reset after 6s), the second click runs it; the menu stays open and shows the outcome inline. A refusal (busy session, unreachable host) shows its reason in the row, stays red, and re-arms on the next click.
 3. **What gets deleted**
    - the session's stored logs under `sessions/<workspace>/<session-id>/` (including `session.v4.jsonl.zstd`);
    - its registry accounting, through the workspace registry's own durable writes (`unpin` → `unarchive` → `detachSession`), so `workspace.json` is written by the registry itself — memory and disk never disagree, and later archives cannot resurrect the deleted id.
@@ -36,7 +36,7 @@ Edit the profile `package.json` (`~/.dsh/profiles/desktop/package.json`):
 ```jsonc
 {
   "dsh": { "profile": { "bundles": [ "dsh-session-delete" ] } },
-  "dependencies": { "dsh-session-delete": "github:<GITHUB_USER>/dsh-session-delete" }
+  "dependencies": { "dsh-session-delete": "github:EarthPretender/dsh-session-delete" }
 }
 ```
 
@@ -68,6 +68,21 @@ Remove `dsh-session-delete` from `dsh.profile.bundles` and `dependencies`, run `
 | `lib/client.js` | Client half: the "Delete session" row in `sidebar.workspaces.session.menu.item` |
 | `cordis.patch.yml` | Bundle patch inserting one loader row carrying both halves |
 | `icon.svg` | Plugin card icon |
+| `scripts/selftest.mjs` | Dependency-free self-test (`npm test`); no DSH needed |
+
+## Development self-check
+
+```bash
+npm test        # = node scripts/selftest.mjs
+```
+
+No DSH required. It covers three things:
+
+1. **Identity** — the `package.json` `name`, the id in `lib/client.js`'s `__ModuleLoader__.load({ id })`, and the `name` of the `cordis.patch.yml` insert row must all be the same string. When they drift, client-modules reports `loaded without registering "…" via __ModuleLoader__.load` and the browser half never activates — Settings then shows "some plugins could not sync on this page".
+2. **Browser half** — the two-step confirm, success/refusal/transport-error outcomes, retry after a failure, and the registered slot's name/id/order/locale.
+3. **Host half** — the route contract (`POST /api/session-delete`, buffered body), malformed method/JSON/path traversal, the 409 for a busy session, a real delete (log dirs + `unpin`/`unarchive`/`detachSession`), idempotence, and the 500 when the store is unreadable.
+
+> Renaming the package (for example `@local/dsh-session-delete` → `dsh-session-delete`) means changing all three places **and restarting the app**: a running page still holds the client module row under the old id, and editing files does not replace it.
 
 ## License
 

@@ -11,7 +11,7 @@
 DSH 官方只提供“归档”（Archive），归档后的会话仍然留在磁盘上、也能在归档区找回。本插件补上**真删除**：
 
 1. **菜单行**：在侧栏每个会话行的“…”菜单里、官方“归档会话”下方新增一行红色“删除会话”，带垃圾桶图标与分隔线。
-2. **二次确认**：第一次点击变为“再次点击确认删除”（6 秒无操作自动还原），第二次点击才真正执行——菜单保持打开并直接显示结果，避免误删。
+2. **二次确认**：第一次点击变为“再次点击确认删除”（6 秒无操作自动还原），第二次点击才真正执行——菜单保持打开并直接显示结果，避免误删。失败时（会话在跑任务、宿主不可达等）行内显示原因并保持红色，再点一次即可重试。
 3. **删除内容**：
    - 删除该会话在 `sessions/<工作区>/<会话id>/` 下的全部日志数据（含 `session.v4.jsonl.zstd`）；
    - 通过工作区注册表的官方持久化写清理登记（`unpin` → `unarchive` → `detachSession`），因此 `workspace.json` 由 registry 自己写，内存与磁盘始终一致，之后归档其他会话也不会把已删的会话“复活”。
@@ -45,7 +45,7 @@ DSH 官方只提供“归档”（Archive），归档后的会话仍然留在磁
   },
   "dependencies": {
     // ... 其他依赖
-    "dsh-session-delete": "github:<GITHUB_USER>/dsh-session-delete"
+    "dsh-session-delete": "github:EarthPretender/dsh-session-delete"
   }
 }
 ```
@@ -87,6 +87,21 @@ DSH 官方只提供“归档”（Archive），归档后的会话仍然留在磁
 | `lib/client.js` | **Client 半**：在 `sidebar.workspaces.session.menu.item` 槽注册“删除会话”行 |
 | `cordis.patch.yml` | bundle 补丁：插入一个同时承载两半的 loader 条目 |
 | `icon.svg` | 插件卡片图标 |
+| `scripts/selftest.mjs` | 零依赖自检（`npm test`），不需要启动 DSH |
+
+## 开发自检
+
+```bash
+npm test        # = node scripts/selftest.mjs
+```
+
+自检不启动 DSH，覆盖三块：
+
+1. **身份一致性**：`package.json` 的 `name`、`lib/client.js` 里 `__ModuleLoader__.load({ id })` 的 id、`cordis.patch.yml` 插入行的 `name` 必须三者相同。不一致时 client-modules 会报 `loaded without registering "…" via __ModuleLoader__.load`，浏览器半永远不会上场——设置页显示“本页面的插件未能完成同步”。
+2. **浏览器半**：二次确认两步、成功/被拒/网络异常三种结果、失败后可重试，以及槽注册的 name/id/order/locale。
+3. **宿主半**：路由契约（`POST /api/session-delete`、buffered body）、非法方法/非 JSON/路径穿越、活动会话 409、真实删除（日志目录 + `unpin`/`unarchive`/`detachSession`）、幂等与存储不可读时的 500。
+
+> 改包名时（例如从 `@local/dsh-session-delete` 改成 `dsh-session-delete`）上面三处必须一起改，然后**重启应用**：已启动的页面仍持有旧 id 的客户端模块行，热改文件不会把旧行换掉。
 
 ## 许可
 
