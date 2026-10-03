@@ -1,0 +1,46 @@
+{
+  "name": "dsh-session-delete",
+  "description": "会话删除插件：在会话“…”菜单的“归档会话”下新增红色的“删除会话”行，二次点击确认后删除该会话的全部日志数据并从工作区登记中移除（不可逆；正在执行任务的会话会拒绝删除）。",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "session",
+    "session-management"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "README_EN.md",
+    "LICENSE"
+  ],
+  "license": "MIT"
+}

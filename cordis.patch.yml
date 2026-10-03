@@ -1,0 +1,4 @@
+# Bundle patch for dsh-session-delete: one loader row carrying both halves.
+- insert:
+    - id: session-delete
+      name: "dsh-session-delete"
