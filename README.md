@@ -19,6 +19,8 @@ DSH 官方只提供“归档”（Archive），归档后的会话仍然留在磁
 ## 安全性设计
 
 - **正在跑任务的会话拒绝删除**：与官方归档使用同一个活动闸门（`workspace/session-activity` waterfall），会话正在执行任务时会返回提示，让你先停止。
+- **本启动中使用过的会话拒绝删除（409）**：它的日志写句柄还开着，jsonl 后端会在下次写入时 `mkdir recursive` 重建被删目录——删除只会"复活"。提示重启后再删即可；**点开浏览历史不会**算"使用过"（只有本启动内发过消息/新建的会话才会 attach），清理旧会话不受影响。
+- **删除成功后列表立即移除该行，无需重启**：插件会广播官方的 `api-session/removed` 事件（`dsh-api-remotes` 转发到每个浏览器），这正是 DSH 自己删除行用的通道——没有它，冷会话的行会留在浏览器启动时的快照里，掉进"未分组"直到重启。幂等的重复点击也会再广播一次，用来清掉残留的旧行。
 - **鉴权继承官方通道**：删除接口挂在 DSH 共享的 `/api` 连接通道上（`connection.registerFetchRoute`），因此 Host/Origin 校验与浏览器认证由官方 `admit()` 统一把关。
 - **幂等**：重复点击或对已删除的会话再次操作不会报错，只提示已删除。
 - **不可逆**：删除会同时移除日志文件与登记，仅剩共享的附件/投影缓存等孤儿数据（无会话关联键，无害）。
@@ -64,8 +66,8 @@ DSH 官方只提供“归档”（Archive），归档后的会话仍然留在磁
 
 1. 重启 DeepSeek Harness（首次安装后）。
 2. 侧栏任意会话行 → “…” → 最底部红色 **“删除会话”**。
-3. 第一次点 → “再次点击确认删除”，再点一次执行；结果显示在行内。
-4. 如果列表未立即刷新，重启应用后一定干净。
+3. 第一次点 → “再次点击确认删除”，再点一次执行；结果直接显示在行内，**该行立即从列表消失**。
+4. 若提示“本次启动中使用过”，重启应用后再删该会话。
 
 安装后在 **设置 → 插件** 里可以看到本插件卡片，并可随时开关。
 
@@ -99,7 +101,7 @@ npm test        # = node scripts/selftest.mjs
 
 1. **身份一致性**：`package.json` 的 `name`、`lib/client.js` 里 `__ModuleLoader__.load({ id })` 的 id、`cordis.patch.yml` 插入行的 `name` 必须三者相同。不一致时 client-modules 会报 `loaded without registering "…" via __ModuleLoader__.load`，浏览器半永远不会上场——设置页显示“本页面的插件未能完成同步”。
 2. **浏览器半**：二次确认两步、成功/被拒/网络异常三种结果、失败后可重试，以及槽注册的 name/id/order/locale。
-3. **宿主半**：路由契约（`POST /api/session-delete`、buffered body）、非法方法/非 JSON/路径穿越、活动会话 409、真实删除（日志目录 + `unpin`/`unarchive`/`detachSession`）、幂等与存储不可读时的 500。
+3. **宿主半**：路由契约（`POST /api/session-delete`、buffered body）、非法方法/非 JSON/路径穿越、活动会话 409、本启动中使用过的（live）会话 409、真实删除（日志目录 + `unpin`/`unarchive`/`detachSession` + header 索引重建）、`api-session/removed` 广播、幂等与存储不可读时的 500。
 
 > 改包名时（例如从 `@local/dsh-session-delete` 改成 `dsh-session-delete`）上面三处必须一起改，然后**重启应用**：已启动的页面仍持有旧 id 的客户端模块行，热改文件不会把旧行换掉。
 

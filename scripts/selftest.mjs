@@ -211,7 +211,7 @@ await check("client: two-step confirm posts one delete and reports success", asy
 	assert.deepEqual(JSON.parse(calls[0].init.body), { sessionId });
 	assert.equal(rows[0], "删除会话");
 	assert.equal(rows[1], "再次点击确认删除");
-	assert.equal(rows[2], "已删除（若列表未刷新请重启应用）");
+	assert.equal(rows[2], "已删除");
 	assert.equal(tree.props.disabled, false, "the row unlocks once the request settled");
 });
 
@@ -245,10 +245,15 @@ async function createHome(sessionId) {
 	return { home, decoy };
 }
 
-/** Load the host half fresh (unique query) and register its route on a stub context. */
-async function loadHost() {
+/** Load the host half fresh (unique query) and register its route on a stub context.
+ * @param options - `withHeaderIndex: false` builds a registry without the header-index
+ *   methods, proving the plugin skips that step gracefully on older registries.
+ */
+async function loadHost(options = {}) {
+	const { withHeaderIndex = true } = options;
 	const module = await import(`${pathToFileURL(join(root, "lib", "index.js")).href}?selftest=${String(Date.now())}-${String(Math.random())}`);
 	const calls = [];
+	const events = [];
 	let route;
 	const registry = {
 		pinnedSessionIds: [sessionId],
@@ -265,15 +270,26 @@ async function loadHost() {
 			detachSession: async (id) => calls.push(`detach:ws-two:${id}`)
 		}]
 	};
+	if (withHeaderIndex) {
+		registry.listStoredHeaders = async () => [{ id: "session-22222222-3333-4444-5555-666666666666" }];
+		registry.replaceHeaderIndex = async (headers) => calls.push(`reindex:${String(headers.length)}`);
+	}
 	let activity = [];
+	const live = new Set();
 	const ctx = {
 		connection: { registerFetchRoute: (_owner, value) => { route = value; } },
 		waterfall: async () => activity,
-		workspaceRegistry: registry
+		workspaceRegistry: registry,
+		sessions: { get: (id) => live.has(id) ? { id } : undefined },
+		emit: (event, ...args) => events.push({ event, args })
 	};
 	module.apply(ctx);
 	assert.ok(route !== undefined, "apply must register one fetch route");
-	return { module, route, calls, ctx, registry, setActivity: (next) => { activity = next; } };
+	return {
+		module, route, calls, events, ctx, registry,
+		setActivity: (next) => { activity = next; },
+		setLive: (id) => live.add(id)
+	};
 }
 
 /** POST a JSON body at the registered route. */
@@ -287,7 +303,7 @@ function post(sessionIdValue) {
 
 await check("host: route descriptor matches the documented connection contract", async () => {
 	const { module, route } = await loadHost();
-	assert.deepEqual(module.inject, ["connection", "workspaceRegistry"]);
+	assert.deepEqual(module.inject, ["connection", "workspaceRegistry", "sessions"]);
 	assert.equal(module.name, "session-delete");
 	assert.equal(route.path, "/api/session-delete");
 	assert.deepEqual(route.methods, ["POST"]);
@@ -331,7 +347,9 @@ await check("host: a successful delete clears every log dir and the accounting",
 	const payload = await response.json();
 	assert.equal(payload.ok, true);
 	assert.equal(payload.deletedLogs, 2, "both stored log dirs for that session must go");
-	assert.deepEqual(host.calls, [`unpin:${sessionId}`, `unarchive:${sessionId}`, `detach:ws-one:${sessionId}`]);
+	assert.equal(payload.headersReindexed, true, "the registry header index must be rebuilt after the logs go");
+	assert.deepEqual(host.calls, [`unpin:${sessionId}`, `unarchive:${sessionId}`, `detach:ws-one:${sessionId}`, "reindex:1"]);
+	assert.deepEqual(host.events, [{ event: "api-session/removed", args: [sessionId] }], "the browser must be told to drop the row now, not at the next restart");
 	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), false);
 	assert.equal(existsSync(join(home, "sessions", "--two--", sessionId)), false);
 	assert.equal(existsSync(join(home, "sessions", "--one--", decoy)), true, "another session's logs must survive");
@@ -339,10 +357,27 @@ await check("host: a successful delete clears every log dir and the accounting",
 	await rm(home, { recursive: true, force: true });
 });
 
-await check("host: deleting an already-removed session is a quiet success", async () => {
+await check("host: a session opened this run is refused with 409 live", async () => {
 	const { home } = await createHome(sessionId);
 	process.env.DSH_HOME = home;
 	const host = await loadHost();
+	host.setLive(sessionId);
+	const response = await host.route.fetch(post(sessionId));
+	assert.equal(response.status, 409);
+	const payload = await response.json();
+	assert.equal(payload.code, "live");
+	assert.ok(payload.message.includes("重启"), "the refusal must tell the user how to proceed");
+	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), true, "a live session's logs must not be touched");
+	assert.deepEqual(host.calls, [], "no bookkeeping may run for a refused delete");
+	assert.deepEqual(host.events, [], "a refused delete must not announce a removal");
+	await rm(home, { recursive: true, force: true });
+});
+
+await check("host: deleting an already-removed session is a quiet success", async () => {
+	const { home } = await createHome(sessionId);
+	process.env.DSH_HOME = home;
+	// This variant registry lacks the header-index methods: the step must be skipped, not fail.
+	const host = await loadHost({ withHeaderIndex: false });
 	await host.route.fetch(post(sessionId));
 	host.registry.pinnedSessionIds = [];
 	host.registry.archivedSessionIds = [];
@@ -352,6 +387,8 @@ await check("host: deleting an already-removed session is a quiet success", asyn
 	assert.equal(again.status, 200);
 	assert.equal(payload.ok, true);
 	assert.equal(payload.code, "already-removed");
+	assert.equal(payload.headersReindexed, false, "a registry without header-index methods reports the skip");
+	assert.deepEqual(host.events.map((entry) => entry.event), ["api-session/removed", "api-session/removed"], "even the idempotent pass re-announces so a stale row still clears");
 	await rm(home, { recursive: true, force: true });
 });
 

@@ -19,6 +19,8 @@ DSH ships Archive only: an archived session stays on disk and can be restored. T
 ## Safety
 
 - **Running sessions are refused** — the same activity gate the official archive action uses (`workspace/session-activity` waterfall).
+- **Sessions opened this run are refused (409)** — their log write handle is still open, and the jsonl backend recreates deleted directories on the next append (`mkdir recursive`), so deleting one would only resurrect it. Restart, then delete. Merely *browsing* a session's history never attaches it — only sessions you messaged or created this run count, so normal cleanup is unaffected.
+- **The row disappears from the list immediately, no restart needed** — the plugin broadcasts the official `api-session/removed` event (forwarded to every browser by `dsh-api-remotes`), the exact channel DSH itself uses to drop rows. Without it a cold session's row stays in the browser's start-up snapshot, stranded in the "Ungrouped" bucket until a restart. An idempotent repeat re-broadcasts as well, to clear any stale leftover row.
 - **Official auth** — the delete endpoint rides DSH's shared `/api` connection channel (`connection.registerFetchRoute`), so Host/Origin checks and browser authentication are enforced by the official `admit()` gate.
 - **Idempotent** — clicking again, or acting on an already-deleted session, answers "already removed" rather than erroring.
 - **Irreversible** — logs and accounting are removed; only shared attachments/projection caches remain as harmless orphans.
@@ -46,8 +48,8 @@ Then run `pnpm install` in the profile directory and restart DeepSeek Harness.
 
 1. Restart DSH after installing.
 2. Hover a sidebar Session row → "…" → the red **Delete session** row at the bottom.
-3. First click arms, second click deletes; the result shows in the row.
-4. If the list does not refresh immediately, a restart guarantees a clean state.
+3. First click arms, second click deletes; the result shows in the row and **the row leaves the list immediately**.
+4. If it says the session was opened this run, restart the app and delete it then.
 
 The plugin appears as a card in **Settings → Plugins** and can be toggled there.
 
@@ -80,7 +82,7 @@ No DSH required. It covers three things:
 
 1. **Identity** — the `package.json` `name`, the id in `lib/client.js`'s `__ModuleLoader__.load({ id })`, and the `name` of the `cordis.patch.yml` insert row must all be the same string. When they drift, client-modules reports `loaded without registering "…" via __ModuleLoader__.load` and the browser half never activates — Settings then shows "some plugins could not sync on this page".
 2. **Browser half** — the two-step confirm, success/refusal/transport-error outcomes, retry after a failure, and the registered slot's name/id/order/locale.
-3. **Host half** — the route contract (`POST /api/session-delete`, buffered body), malformed method/JSON/path traversal, the 409 for a busy session, a real delete (log dirs + `unpin`/`unarchive`/`detachSession`), idempotence, and the 500 when the store is unreadable.
+3. **Host half** — the route contract (`POST /api/session-delete`, buffered body), malformed method/JSON/path traversal, the 409 for a busy session, the 409 for a session opened this run, a real delete (log dirs + `unpin`/`unarchive`/`detachSession` + header-index rebuild), the `api-session/removed` broadcast, idempotence, and the 500 when the store is unreadable.
 
 > Renaming the package (for example `@local/dsh-session-delete` → `dsh-session-delete`) means changing all three places **and restarting the app**: a running page still holds the client module row under the old id, and editing files does not replace it.
 
