@@ -215,16 +215,43 @@ await check("client: two-step confirm posts one delete and reports success", asy
 	assert.equal(tree.props.disabled, false, "the row unlocks once the request settled");
 });
 
-await check("client: a refused delete keeps the reason and re-arms on the next click", async () => {
+await check("client: a non-activity refusal keeps the reason and re-arms on the next click", async () => {
 	const scenario = await runClientScenario(async () => ({
 		ok: false,
-		status: 409,
-		json: async () => ({ ok: false, code: "active", message: "会话正在执行任务，请先停止后再删除" })
+		status: 500,
+		json: async () => ({ ok: false, code: "locked", message: "写句柄仍未关闭，请稍后重试" })
 	}));
-	assert.equal(scenario.current().props.children, "删除失败: 会话正在执行任务，请先停止后再删除");
+	assert.equal(scenario.current().props.children, "删除失败: 写句柄仍未关闭，请稍后重试");
 	assert.equal(scenario.current().props.danger, true, "the failed row stays a destructive row, ready to retry");
 	await scenario.current().props.onSelect();
 	assert.equal(scenario.current().props.children, "再次点击确认删除", "a failed row must be retryable, not a dead end");
+});
+
+await check("client: a busy session arms a force row that sends force: true", async () => {
+	const bodies = [];
+	const scenario = await runClientScenario(async (_url, init) => {
+		bodies.push(JSON.parse(init.body));
+		if (bodies.length === 1) {
+			return {
+				ok: false,
+				status: 409,
+				json: async () => ({ ok: false, code: "active", message: "会话正在执行任务——再次点击将停止任务并强行删除" })
+			};
+		}
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({ ok: true, deletedLogs: 1, steps: [], headersReindexed: true, stopped: true, disposed: true })
+		};
+	});
+	// runClientScenario already clicked: arm + confirm (POST #1 → 409 active).
+	assert.equal(scenario.current().props.children, "再次点击：停止任务并强行删除", "a busy session must show the second warning, not an error");
+	assert.equal(scenario.current().props.danger, true);
+	await scenario.current().props.onSelect();
+	assert.equal(scenario.current().props.children, "已删除");
+	assert.deepEqual(bodies[0], { sessionId }, "the first attempt must not force");
+	assert.deepEqual(bodies[1], { sessionId, force: true }, "the second attempt must carry force: true");
+	assert.equal(bodies.length, 2);
 });
 
 await check("client: an unreachable host surfaces the transport error", async () => {
@@ -247,10 +274,13 @@ async function createHome(sessionId) {
 
 /** Load the host half fresh (unique query) and register its route on a stub context.
  * @param options - `withHeaderIndex: false` builds a registry without the header-index
- *   methods, proving the plugin skips that step gracefully on older registries.
+ *   methods (the plugin must skip that step gracefully); `stopObeys: false` simulates
+ *   providers that ignore `workspace/session-stop`; `detachBroken: true` simulates a
+ *   DSH whose store entry no longer carries `detach` (the plugin must refuse rather
+ *   than half-delete).
  */
 async function loadHost(options = {}) {
-	const { withHeaderIndex = true } = options;
+	const { withHeaderIndex = true, stopObeys = true, detachBroken = false } = options;
 	const module = await import(`${pathToFileURL(join(root, "lib", "index.js")).href}?selftest=${String(Date.now())}-${String(Math.random())}`);
 	const calls = [];
 	const events = [];
@@ -275,12 +305,22 @@ async function loadHost(options = {}) {
 		registry.replaceHeaderIndex = async (headers) => calls.push(`reindex:${String(headers.length)}`);
 	}
 	let activity = [];
-	const live = new Set();
+	const live = new Map();
+	const agentStore = new Map();
 	const ctx = {
 		connection: { registerFetchRoute: (_owner, value) => { route = value; } },
 		waterfall: async () => activity,
+		parallel: async (eventName, payload) => {
+			calls.push(`parallel:${eventName}:${payload.sessionId}`);
+			if (stopObeys) activity = [];
+		},
 		workspaceRegistry: registry,
-		sessions: { get: (id) => live.has(id) ? { id } : undefined },
+		sessions: {
+			get: (id) => live.get(id)?.session,
+			flush: async (session) => { calls.push(`flush:${session.id}`); },
+			store: { get: (id) => live.get(id) }
+		},
+		agents: { store: { get: (id) => agentStore.get(id) } },
 		emit: (event, ...args) => events.push({ event, args })
 	};
 	module.apply(ctx);
@@ -288,7 +328,20 @@ async function loadHost(options = {}) {
 	return {
 		module, route, calls, events, ctx, registry,
 		setActivity: (next) => { activity = next; },
-		setLive: (id) => live.add(id)
+		setLive: (id) => {
+			const session = { id };
+			const entry = { id, session, detachRequested: false };
+			if (detachBroken) {
+				// No `detach` on the entry: the plugin must detect and refuse.
+				entry.detachRequested = false;
+			} else {
+				entry.detach = () => { calls.push(`dispose:${id}`); live.delete(id); };
+			}
+			live.set(id, entry);
+			const agentEntry = { id, detachRequested: false };
+			agentEntry.detach = () => { calls.push(`agent-detach:${id}`); agentStore.delete(id); };
+			agentStore.set(id, agentEntry);
+		}
 	};
 }
 
@@ -298,6 +351,15 @@ function post(sessionIdValue) {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ sessionId: sessionIdValue })
+	});
+}
+
+/** POST the forced variant (stop the task first, then delete). */
+function postForce(sessionIdValue) {
+	return new Request("http://dsh.invalid/api/session-delete", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ sessionId: sessionIdValue, force: true })
 	});
 }
 
@@ -324,7 +386,7 @@ await check("host: malformed requests are refused before touching the disk", asy
 	await rm(home, { recursive: true, force: true });
 });
 
-await check("host: a session running work is refused with 409", async () => {
+await check("host: a session running work is refused with 409 until forced", async () => {
 	const { home } = await createHome(sessionId);
 	process.env.DSH_HOME = home;
 	const host = await loadHost();
@@ -333,8 +395,10 @@ await check("host: a session running work is refused with 409", async () => {
 	assert.equal(response.status, 409);
 	const payload = await response.json();
 	assert.equal(payload.code, "active");
+	assert.ok(payload.message.includes("强行删除"), "the refusal must point at the force path");
 	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), true, "a refused delete must not touch the logs");
-	assert.deepEqual(host.calls, []);
+	assert.deepEqual(host.calls, [], "no stop, dispose, or bookkeeping may run without force");
+	assert.deepEqual(host.events, [], "a refused delete must not announce a removal");
 	await rm(home, { recursive: true, force: true });
 });
 
@@ -357,19 +421,96 @@ await check("host: a successful delete clears every log dir and the accounting",
 	await rm(home, { recursive: true, force: true });
 });
 
-await check("host: a session opened this run is refused with 409 live", async () => {
+await check("host: a session opened this run is disposed, then deleted", async () => {
 	const { home } = await createHome(sessionId);
 	process.env.DSH_HOME = home;
 	const host = await loadHost();
+	host.setLive(sessionId);
+	const response = await host.route.fetch(post(sessionId));
+	assert.equal(response.status, 200, "an attached session must be deletable, not refused");
+	const payload = await response.json();
+	assert.equal(payload.ok, true);
+	assert.equal(payload.disposed, true, "the store entry must be detached so no writer survives");
+	assert.equal(payload.stopped, false, "an idle session needs no stop");
+	assert.equal(payload.deletedLogs, 2);
+	assert.deepEqual(host.calls, [
+		`flush:${sessionId}`,
+		`dispose:${sessionId}`,
+		`agent-detach:${sessionId}`,
+		`unpin:${sessionId}`,
+		`unarchive:${sessionId}`,
+		`detach:ws-one:${sessionId}`,
+		"reindex:1"
+	], "flush → detach session → deregister agent → bookkeeping → reindex, in that order");
+	assert.deepEqual(host.events, [{ event: "api-session/removed", args: [sessionId] }]);
+	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), false);
+	assert.equal(existsSync(join(home, "sessions", "--two--", sessionId)), false);
+	await rm(home, { recursive: true, force: true });
+});
+
+await check("host: an attached session the store cannot detach is refused, not half-deleted", async () => {
+	const { home } = await createHome(sessionId);
+	process.env.DSH_HOME = home;
+	const host = await loadHost({ detachBroken: true });
 	host.setLive(sessionId);
 	const response = await host.route.fetch(post(sessionId));
 	assert.equal(response.status, 409);
 	const payload = await response.json();
 	assert.equal(payload.code, "live");
 	assert.ok(payload.message.includes("重启"), "the refusal must tell the user how to proceed");
-	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), true, "a live session's logs must not be touched");
-	assert.deepEqual(host.calls, [], "no bookkeeping may run for a refused delete");
+	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), true, "logs must survive a refusal");
+	assert.deepEqual(host.calls, [`flush:${sessionId}`], "only the pre-dispose flush may have run");
 	assert.deepEqual(host.events, [], "a refused delete must not announce a removal");
+	await rm(home, { recursive: true, force: true });
+});
+
+await check("host: force stops the task, then disposes and deletes", async () => {
+	const { home } = await createHome(sessionId);
+	process.env.DSH_HOME = home;
+	const host = await loadHost();
+	host.setActivity(["turn"]);
+	host.setLive(sessionId);
+	const response = await host.route.fetch(postForce(sessionId));
+	assert.equal(response.status, 200);
+	const payload = await response.json();
+	assert.equal(payload.ok, true);
+	assert.equal(payload.stopped, true, "force must dispatch the official stop first");
+	assert.equal(payload.disposed, true);
+	assert.equal(payload.deletedLogs, 2);
+	assert.deepEqual(host.calls, [
+		`parallel:workspace/session-stop:${sessionId}`,
+		`flush:${sessionId}`,
+		`dispose:${sessionId}`,
+		`agent-detach:${sessionId}`,
+		`unpin:${sessionId}`,
+		`unarchive:${sessionId}`,
+		`detach:ws-one:${sessionId}`,
+		"reindex:1"
+	], "stop → flush → dispose → agent → bookkeeping → reindex, in that order");
+	assert.deepEqual(host.events, [{ event: "api-session/removed", args: [sessionId] }]);
+	assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), false);
+	await rm(home, { recursive: true, force: true });
+});
+
+await check("host: force proceeds when providers never report idle", async () => {
+	const { home } = await createHome(sessionId);
+	process.env.DSH_HOME = home;
+	process.env.SESSION_DELETE_STOP_WAIT_MS = "300";
+	try {
+		const host = await loadHost({ stopObeys: false });
+		host.setActivity(["turn"]);
+		host.setLive(sessionId);
+		const response = await host.route.fetch(postForce(sessionId));
+		assert.equal(response.status, 200, "a provider that refuses to stop must not hang the forced delete");
+		const payload = await response.json();
+		assert.equal(payload.ok, true);
+		assert.equal(payload.stopped, true, "the stop was still dispatched");
+		assert.equal(payload.disposed, true);
+		assert.equal(payload.deletedLogs, 2);
+		assert.equal(existsSync(join(home, "sessions", "--one--", sessionId)), false);
+	} finally {
+		delete process.env.SESSION_DELETE_STOP_WAIT_MS;
+	}
 	await rm(home, { recursive: true, force: true });
 });
 

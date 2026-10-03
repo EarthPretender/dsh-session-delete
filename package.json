@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-delete",
-  "description": "会话删除插件：在会话“…”菜单的“归档会话”下新增红色的“删除会话”行，二次点击确认后删除该会话的全部日志数据并从工作区登记中移除（不可逆；正在执行任务的会话会拒绝删除）。",
-  "version": "0.1.1",
+  "description": "会话删除插件：在会话“…”菜单的“归档会话”下新增红色的“删除会话”行，二次点击确认后删除该会话的全部日志数据并从工作区登记中移除（不可逆；当次启动使用过的会话先从内存停用再删，正在执行任务的会话会先提醒、再点一次停止任务并删除）。",
+  "version": "0.2.0",
   "type": "module",
   "author": "EarthPretender",
   "repository": {
@@ -47,6 +47,7 @@
   },
   "files": [
     "lib",
+    "scripts",
     "cordis.patch.yml",
     "icon.svg",
     "README.md",
